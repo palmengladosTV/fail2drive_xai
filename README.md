@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/hero.gif" alt="teaser"/>
+  <img src="./assets/hero.gif" alt="teaser" width="61.3%"> <img src="./assets/bar_plot.png" width="37.7%">
 </p>
 
 Fail2Drive is the first CARLA v2 benchmark designed to test closed-loop generalization on truly unseen long-tail scenarios. By pairing each shifted route with an in-distribution reference scenario, it exposes substantial hidden failure modes in current state-of-the-art driving models.
@@ -28,7 +28,7 @@ Fail2Drive is the first CARLA v2 benchmark designed to test closed-loop generali
 
 ## Leaderboard
 
-<a href="https://github.com/SimonGer/fail2drive_leaderboard"><img src="https://raw.githubusercontent.com/SimonGer/fail2drive_leaderboard/main/rendered/table.png" width="63%"></a> <img src="./assets/bar_plot.png" width="35%">
+[![Leaderboard](https://raw.githubusercontent.com/SimonGer/fail2drive_leaderboard/main/rendered/table.png)](https://github.com/SimonGer/fail2drive_leaderboard)
 
 ## Contents
 

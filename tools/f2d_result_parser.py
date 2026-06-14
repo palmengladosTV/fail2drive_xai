@@ -388,7 +388,7 @@ def print_hm_overview(
         widths["Rel %"] = max(widths["Rel %"], len(f"{row['Drop %']:.1f}%"))
 
     header = " | ".join(column.ljust(widths[column]) for column in columns)
-    separator = "-+-".join("-" * widths[column] for column in columns)
+    separator = "-|-".join("-" * widths[column] for column in columns)
     print(header)
     print(separator)
 
