@@ -4,6 +4,8 @@
 
 <h1 align="center">Fail2Drive: Benchmarking Closed-Loop Driving Generalization</h1>
 
+<p align="center"><a href="./README.md">English</a> · <a href="./README.zh-CN.md">简体中文</a> · <a href="./README.ja.md">日本語</a></p>
+
 <p align="center">
   <a href="https://simonger.github.io/fail2drive/">Project Page</a> &nbsp;|&nbsp;
   <a href="https://arxiv.org/pdf/2604.08535">Paper</a> &nbsp;|&nbsp;
@@ -168,12 +170,12 @@ We also thank the authors of the models evaluated in our benchmark: [SimLingo](h
 
 ```bibtex
 @misc{gerstenecker2026fail2drivebenchmarkingclosedloopdriving,
-      title={Fail2Drive: Benchmarking Closed-Loop Driving Generalization}, 
+      title={Fail2Drive: Benchmarking Closed-Loop Driving Generalization},
       author={Simon Gerstenecker and Andreas Geiger and Katrin Renz},
       year={2026},
       eprint={2604.08535},
       archivePrefix={arXiv},
       primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2604.08535}, 
+      url={https://arxiv.org/abs/2604.08535},
 }
 ```
