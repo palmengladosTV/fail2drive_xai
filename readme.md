@@ -159,7 +159,7 @@ self.xai_n_steps = 50             # Integrated Gradients Schritte
 self.xai_baseline = 'zeros'       # Baseline für IG (zeros = schwarzes Bild)
 self.xai_target_layer = '...'     # Ziel-Layer für GradCAM
 self.xai_skip_first_steps = 60    # Erste N Steps überspringen (Warmup)
-self.xai_event_driven = Trü      # Event-basiertes Speichern aktivieren
+self.xai_event_driven = True      # Event-basiertes Speichern aktivieren
 self.xai_event_object_distance = 15.0  # Speichern wenn Objekt näher als N Meter
 self.xai_event_brake_threshold = 1.0   # Speichern wenn pred. Speed < N m/s
 ```
