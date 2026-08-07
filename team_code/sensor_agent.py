@@ -121,6 +121,19 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     if self.config.tp_attention:
       self.tp_attention_buffer = []
 
+    self.xai_enabled = int(os.environ.get('XAI_ENABLED', 0)) == 1
+    self.xai_live = int(os.environ.get('XAI_LIVE', 0)) == 1
+    if self.xai_enabled:
+      self.xai_engine = None
+      self.xai_visualizer = None
+      self.xai_method = os.environ.get('XAI_METHOD', 'saliency')
+      self.xai_output_head = os.environ.get('XAI_OUTPUT_HEAD', 'target_speed')
+      if self.xai_live:
+        from xai.visualization import XAIVisualizer
+        self.xai_visualizer = XAIVisualizer(self.config)
+      print(f'XAI enabled: save_tensors=True, live={self.xai_live}, '
+            f'method={self.xai_method}, output_head={self.xai_output_head}')
+
     # Stop signs can be occluded with our camera setup. This buffer remembers them until cleared.
     # Very useful on the LAV benchmark
     self.stop_sign_controller = int(os.environ.get('STOP_CONTROL', 1))
@@ -622,6 +635,74 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
       if self.live_visu and debug_image is not None:
         self._display_debug_output(debug_image)
+
+    if self.xai_enabled and (self.save_path is not None):
+      should_save = False
+      save_reason = 'periodic'
+
+      # Skip initial frames where the car hasn't started moving yet
+      past_warmup = self.step > self.config.xai_skip_first_steps
+
+      if past_warmup and (self.step % self.config.xai_save_freq == 0):
+        should_save = True
+        save_reason = 'periodic'
+
+      # Event-based: save when objects are detected nearby (potential hazard)
+      if past_warmup and self.config.xai_event_driven and bbs_vehicle_coordinate_system is not None:
+        for box in bbs_vehicle_coordinate_system:
+          dist = np.sqrt(box[0]**2 + box[1]**2)
+          if dist < self.config.xai_event_object_distance:
+            should_save = True
+            save_reason = f'object_nearby_{dist:.1f}m'
+            break
+
+      # Event-based: save when model predicts braking
+      if past_warmup and self.config.xai_event_driven and self.config.use_controller_input_prediction:
+        if pred_target_speed_scalar < self.config.xai_event_brake_threshold:
+          should_save = True
+          save_reason = f'braking_{pred_target_speed_scalar:.1f}ms'
+
+      if should_save:
+        xai_tensors_dir = self.save_path / 'xai_tensors'
+        xai_tensors_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'rgb': tick_data['rgb'].cpu(),
+            'lidar_bev': lidar_bev.cpu(),
+            'target_point': tick_data['target_point'].cpu(),
+            'ego_vel': velocity.cpu(),
+            'command': tick_data['command'].cpu(),
+            'step': self.step,
+            'save_reason': save_reason,
+            'pred_target_speed': pred_target_speed_scalar if self.config.use_controller_input_prediction else None,
+            'gt_speed': gt_velocity.item(),
+        }, xai_tensors_dir / f'{self.step:06d}.pt')
+
+      if self.xai_live:
+        if self.xai_engine is None:
+          from xai.attributions import XAIEngine
+          self.xai_engine = XAIEngine(self.nets[0], self.config, device=self.device)
+        try:
+          attributions = self.xai_engine.compute_attribution(
+              method=self.xai_method,
+              output_head=self.xai_output_head,
+              rgb=tick_data['rgb'],
+              lidar_bev=lidar_bev,
+              target_point=tick_data['target_point'],
+              ego_vel=velocity,
+              command=tick_data['command'],
+              attributed_modalities=('rgb', 'lidar'),
+          )
+          self.xai_visualizer.render_combined(
+              rgb_tensor=tick_data['rgb'][0],
+              lidar_bev_tensor=lidar_bev[0],
+              attributions={k: v[0] for k, v in attributions.items()},
+              method_name=self.xai_method,
+              output_head=self.xai_output_head,
+              save_path=str(self.save_path / 'xai'),
+              step=self.step,
+          )
+        except Exception as e:
+          print(f'XAI computation failed at step {self.step}: {e}')
 
     if self.config.inference_direct_controller and self.config.use_controller_input_prediction:
       pred_checkpoints = torch.stack(pred_checkpoints, dim=0).mean(dim=0).detach().cpu().numpy()

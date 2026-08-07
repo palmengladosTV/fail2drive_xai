@@ -4,7 +4,7 @@
 
 <h1 align="center">Fail2Drive: Benchmarking Closed-Loop Driving Generalization</h1>
 
-<p align="center"><a href="./README.md">English</a> · <a href="./README.zh-CN.md">简体中文</a> · <a href="./README.ja.md">日本語</a></p>
+<p align="center"><a href="f2d_readme.md">English</a> · <a href="./README.zh-CN.md">简体中文</a> · <a href="./README.ja.md">日本語</a></p>
 
 <p align="center">
   <a href="https://simonger.github.io/fail2drive/">Project Page</a> &nbsp;|&nbsp;

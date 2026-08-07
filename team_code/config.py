@@ -808,6 +808,21 @@ class GlobalConfig:
     self.brake_uncertainty_threshold = 0.9  # 1 means that it is not used at all
 
     # -----------------------------------------------------------------------------
+    # XAI / Explainability (Captum)
+    # -----------------------------------------------------------------------------
+    self.xai_enabled = False
+    self.xai_methods = ['saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation', 'attention']
+    self.xai_output_heads = ['target_speed', 'checkpoint', 'waypoint', 'bbox', 'semantic']
+    self.xai_save_freq = 10
+    self.xai_n_steps = 50
+    self.xai_baseline = 'zeros'
+    self.xai_target_layer = 'backbone.image_encoder.layer4'
+    self.xai_skip_first_steps = 100
+    self.xai_event_driven = True
+    self.xai_event_object_distance = 15.0
+    self.xai_event_brake_threshold = 1.0
+
+    # -----------------------------------------------------------------------------
     # PlanT
     # -----------------------------------------------------------------------------
     self.use_plant = False

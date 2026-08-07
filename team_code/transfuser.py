@@ -98,6 +98,8 @@ class TransfuserBackbone(nn.Module):
     self.perspective_upsample_factor = self.image_encoder.feature_info.info[
         start_index + 3]['reduction'] // self.config.perspective_downsample_factor
 
+    self.store_attention = False
+
     if self.config.transformer_decoder_join:
       self.num_features = self.lidar_encoder.feature_info.info[start_index + 3]['num_chs']
     else:
@@ -218,6 +220,25 @@ class TransfuserBackbone(nn.Module):
       if name in return_layers:
         break
     return features
+
+  def set_store_attention(self, store):
+    """Enable/disable attention weight storage in GPT fusion blocks for XAI."""
+    self.store_attention = store
+    for transformer in self.transformers:
+      for block in transformer.blocks:
+        block.attn.store_attention = store
+
+  def get_attention_maps(self):
+    """Retrieve stored attention maps from GPT fusion blocks."""
+    maps = []
+    for transformer in self.transformers:
+      scale_maps = []
+      for block in transformer.blocks:
+        if block.attn.latest_attention_weights is not None:
+          scale_maps.append(block.attn.latest_attention_weights)
+      if scale_maps:
+        maps.append(torch.stack(scale_maps, dim=0).mean(dim=0))
+    return maps
 
   def fuse_features(self, image_features, lidar_features, layer_idx):
     """
@@ -358,6 +379,8 @@ class SelfAttention(nn.Module):
     # output projection
     self.proj = nn.Linear(n_embd, n_embd)
     self.n_head = n_head
+    self.store_attention = False
+    self.latest_attention_weights = None
 
   def forward(self, x):
     b, t, c = x.size()
@@ -368,14 +391,20 @@ class SelfAttention(nn.Module):
     q = self.query(x).view(b, t, self.n_head, c // self.n_head).transpose(1, 2)  # (b, nh, t, hs)
     v = self.value(x).view(b, t, self.n_head, c // self.n_head).transpose(1, 2)  # (b, nh, t, hs)
 
-    # self-attend: (b, nh, t, hs) x (b, nh, hs, t) -> (b, nh, t, t)
-    # efficient attention using Flash Attention CUDA kernels
-    y = torch.nn.functional.scaled_dot_product_attention(q,
-                                                         k,
-                                                         v,
-                                                         attn_mask=None,
-                                                         dropout_p=self.dropout if self.training else 0,
-                                                         is_causal=False)
+    if self.store_attention:
+      scale = (c // self.n_head) ** -0.5
+      attn_weights = (q @ k.transpose(-2, -1)) * scale
+      attn_weights = torch.softmax(attn_weights, dim=-1)
+      self.latest_attention_weights = attn_weights.detach()
+      y = attn_weights @ v
+    else:
+      # efficient attention using Flash Attention CUDA kernels
+      y = torch.nn.functional.scaled_dot_product_attention(q,
+                                                           k,
+                                                           v,
+                                                           attn_mask=None,
+                                                           dropout_p=self.dropout if self.training else 0,
+                                                           is_causal=False)
 
     y = y.transpose(1, 2).contiguous().view(b, t, c)  # re-assemble all head outputs side by side
 

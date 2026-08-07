@@ -1,0 +1,1 @@
+LIVE_VISU=1 python leaderboard/leaderboard/leaderboard_evaluator_local.py   --routes /home/timpalm/ProjectAI/fail2drive/fail2drive_split/Generalization_PedestriansOnRoad_1085.xml   --agent /home/timpalm/ProjectAI/fail2drive/team_code/sensor_agent.py   --agent-config /home/timpalm/ProjectAI/fail2drive/checkpoints/tfpp
