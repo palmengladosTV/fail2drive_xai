@@ -46,11 +46,34 @@ import jsonpickle.ext.numpy as jsonpickle_numpy
 jsonpickle_numpy.register_handlers()
 
 
-def load_model(checkpoint_path, device):
-    """Load a LidarCenterNet model from a checkpoint directory.
+def detect_model_type(checkpoint_path):
+    """Detect whether checkpoint is TF++ (.pth) or PlanT2 (.ckpt)."""
+    pth_files = [f for f in os.listdir(checkpoint_path)
+                 if f.endswith('.pth') and f.startswith('model')]
+    ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
 
-    The directory must contain config.json and at least one model_*.pth file.
-    """
+    if pth_files:
+        return 'tfpp'
+    elif ckpt_files:
+        return 'plant2'
+    else:
+        raise FileNotFoundError(
+            f"No model files found in {checkpoint_path}. "
+            "Expected model_*.pth (TF++) or *.ckpt (PlanT2).")
+
+
+def load_model(checkpoint_path, device):
+    """Load model from a checkpoint directory. Auto-detects TF++ vs PlanT2."""
+    model_type = detect_model_type(checkpoint_path)
+
+    if model_type == 'tfpp':
+        return _load_tfpp(checkpoint_path, device)
+    else:
+        return _load_plant2(checkpoint_path, device)
+
+
+def _load_tfpp(checkpoint_path, device):
+    """Load a LidarCenterNet (TF++) model."""
     config_file = os.path.join(checkpoint_path, 'config.json')
     with open(config_file, 'rt', encoding='utf-8') as f:
         json_config = f.read()
@@ -68,13 +91,28 @@ def load_model(checkpoint_path, device):
     if not model_files:
         raise FileNotFoundError(f"No model .pth files found in {checkpoint_path}")
 
-    print(f"Loading model: {model_files[0]}")
+    print(f"Loading TF++ model: {model_files[0]}")
     state_dict = torch.load(os.path.join(checkpoint_path, model_files[0]), map_location=device)
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
     model.eval()
 
     return model, config
+
+
+def _load_plant2(checkpoint_path, device):
+    """Load a PlanT2 (HFLM) model from a Lightning checkpoint."""
+    from plant2_lit_module import LitHFLM
+
+    ckpt_files = sorted([f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')])
+    ckpt_path = os.path.join(checkpoint_path, ckpt_files[0])
+
+    print(f"Loading PlanT2 model: {ckpt_files[0]}")
+    lit_model = LitHFLM.load_from_checkpoint(ckpt_path, map_location=device, strict=False)
+    lit_model.eval()
+
+    config = GlobalConfig()
+    return lit_model, config
 
 
 def load_tensor_samples(tensor_dir, num_samples=None):
@@ -105,10 +143,8 @@ def run_analysis(args):
     print(f'Device: {device}')
 
     print(f'Loading model from: {args.checkpoint}')
+    model_type = detect_model_type(args.checkpoint)
     model, config = load_model(args.checkpoint, device)
-
-    engine = XAIEngine(model, config, device=device)
-    visualizer = XAIVisualizer(config)
 
     from datetime import datetime
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -117,17 +153,35 @@ def run_analysis(args):
 
     pt_files = load_tensor_samples(args.tensor_dir, args.num_samples)
 
+    # Detect tensor format from first sample
+    first_sample = torch.load(pt_files[0], map_location='cpu')
+    tensor_type = first_sample.get('model_type', 'tfpp')
+    print(f'  Detected tensor format: {tensor_type}')
+
+    if model_type == 'tfpp' and tensor_type == 'tfpp':
+        _run_tfpp_analysis(args, model, config, device, pt_files, output_dir)
+    elif model_type == 'plant2' or tensor_type == 'plant2':
+        _run_plant2_analysis(args, model, device, pt_files, output_dir)
+    else:
+        raise ValueError(f"Unsupported model/tensor combination: model={model_type}, tensors={tensor_type}")
+
+
+def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
+    """Run XAI analysis for TF++ (LidarCenterNet) tensors."""
+    engine = XAIEngine(model, config, device=device)
+    visualizer = XAIVisualizer(config)
+
     aggregate_stats = {method: {head: {'rgb_importance': [], 'lidar_importance': []}
                                  for head in args.output_heads}
                        for method in args.methods}
 
-    print(f'\nRunning XAI analysis:')
+    print(f'\nRunning TF++ XAI analysis:')
     print(f'  Methods: {args.methods}')
     print(f'  Output heads: {args.output_heads}')
     print(f'  Samples: {len(pt_files)}')
     print(f'  Output: {output_dir}\n')
 
-    for pt_file in tqdm(pt_files, desc='XAI Analysis'):
+    for pt_file in tqdm(pt_files, desc='XAI Analysis (TF++)'):
         sample = torch.load(pt_file, map_location=device)
 
         rgb = sample['rgb'].to(device)
@@ -198,14 +252,229 @@ def run_analysis(args):
             except Exception as e:
                 print(f"\n  Warning: attention extraction failed for step {step}: {e}")
 
+    _print_and_save_summary(aggregate_stats, args.methods, args.output_heads, output_dir)
+
+
+def _run_plant2_analysis(args, model, device, pt_files, output_dir):
+    """Run XAI analysis for PlanT2 tensors (token-level attribution)."""
+    from captum.attr import Saliency, IntegratedGradients, FeatureAblation, NoiseTunnel
+    from xai.plant_visualization import PlanTXAIVisualizer
+
+    raw_model = model.model if hasattr(model, 'model') else model
+    raw_model.to(device)
+    raw_model.train()
+    for module in raw_model.modules():
+        if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d,
+                               torch.nn.SyncBatchNorm, torch.nn.LayerNorm)):
+            module.eval()
+
+    config = GlobalConfig()
+    visualizer = PlanTXAIVisualizer(config)
+
+    plant2_heads = [h for h in args.output_heads if h in ('target_speed', 'checkpoint', 'waypoint')]
+    if not plant2_heads:
+        plant2_heads = ['waypoint']
+        print(f'  Note: Defaulting to output_heads={plant2_heads} for PlanT2')
+
+    plant2_methods = [m for m in args.methods if m in ('saliency', 'integrated_gradients', 'feature_ablation')]
+    if not plant2_methods:
+        plant2_methods = ['saliency']
+        print(f'  Note: Defaulting to methods={plant2_methods} for PlanT2 (grad_cam not supported)')
+
+    aggregate_stats = {method: {head: {'token_importance_mean': [], 'num_active_tokens': []}
+                                 for head in plant2_heads}
+                       for method in plant2_methods}
+
+    print(f'\nRunning PlanT2 XAI analysis (token-level):')
+    print(f'  Methods: {plant2_methods}')
+    print(f'  Output heads: {plant2_heads}')
+    print(f'  Samples: {len(pt_files)}')
+    print(f'  Output: {output_dir}\n')
+
+    class PlanT2ForwardWrapper(torch.nn.Module):
+        """Wraps PlanT2 for Captum: continuous features as input, scalar output.
+
+        Key insight: x_objs[:, 0] is the type indicator (discrete category).
+        It's used in a boolean mask (x_objs[...,0] == i) which has zero gradient.
+        For IG, interpolating it creates non-integer values that match no type.
+
+        Solution: attribute only to continuous features (columns 1-6),
+        keeping the type column fixed via additional_forward_args.
+        """
+        def __init__(self, hflm_model, output_head):
+            super().__init__()
+            self.hflm = hflm_model
+            self.output_head = output_head
+            self.batch_template = None
+
+        def forward(self, x_objs_features, x_objs_types):
+            # Reconstruct full x_objs: [types | features]
+            x_objs = torch.cat([x_objs_types, x_objs_features], dim=-1)
+
+            batch = dict(self.batch_template)
+            batch['x_objs'] = x_objs
+            if hasattr(self.hflm, 'input_bev') and self.hflm.input_bev and 'BEV' not in batch:
+                batch['BEV'] = torch.zeros(1, 3, 128, 128, device=x_objs.device)
+            _, _, pred_plan, _ = self.hflm(batch)
+            pred_path, pred_wps, pred_speed = pred_plan
+
+            if self.output_head == 'target_speed' and pred_speed is not None:
+                return pred_speed.sum(dim=-1)
+            elif self.output_head == 'waypoint' and pred_wps is not None:
+                return pred_wps.norm(dim=-1).sum(dim=-1)
+            elif self.output_head == 'checkpoint' and pred_path is not None:
+                return pred_path.norm(dim=-1).sum(dim=-1)
+            elif pred_wps is not None:
+                return pred_wps.norm(dim=-1).sum(dim=-1)
+            elif pred_path is not None:
+                return pred_path.norm(dim=-1).sum(dim=-1)
+            else:
+                raise ValueError(f"No valid output for head '{self.output_head}'")
+
+    for pt_file in tqdm(pt_files, desc='XAI Analysis (PlanT2)'):
+        sample = torch.load(pt_file, map_location=device)
+        step = sample.get('step', int(pt_file.stem))
+
+        x_objs = sample['x_objs'].to(device)
+        idxs = sample['idxs'].to(device)
+        route_original = sample['route_original'].to(device)
+        speed_limit = sample['speed_limit'].to(device)
+
+        if route_original.dim() == 2:
+            route_original = route_original.unsqueeze(0)
+        if speed_limit.dim() == 0:
+            speed_limit = speed_limit.unsqueeze(0)
+        if idxs.dim() == 1:
+            idxs = idxs.unsqueeze(0)
+
+        batch = {
+            'x_objs': x_objs,
+            'idxs': idxs,
+            'route_original': route_original,
+            'speed_limit': speed_limit,
+            'y_objs': None,
+        }
+        if 'ego_speed' in sample:
+            es = sample['ego_speed'].to(device)
+            if es.dim() == 0:
+                es = es.unsqueeze(0)
+            batch['ego_speed'] = es
+
+        for method in plant2_methods:
+            for output_head in plant2_heads:
+                try:
+                    wrapper = PlanT2ForwardWrapper(raw_model, output_head)
+                    wrapper.batch_template = batch
+
+                    # Split x_objs into types (col 0, constant) and features (cols 1-6, attributed)
+                    x_objs_types = x_objs[:, 0:1].detach()  # NOT attributed
+                    x_objs_features = x_objs[:, 1:].detach().requires_grad_(True)
+
+                    with torch.enable_grad():
+                        if method == 'saliency':
+                            attr_method = Saliency(wrapper)
+                            attrs = attr_method.attribute(
+                                x_objs_features,
+                                additional_forward_args=(x_objs_types,))
+                        elif method == 'integrated_gradients':
+                            attr_method = IntegratedGradients(wrapper)
+                            baseline = torch.zeros_like(x_objs_features)
+                            attrs = attr_method.attribute(
+                                x_objs_features, baselines=baseline,
+                                additional_forward_args=(x_objs_types,),
+                                n_steps=50)
+                        elif method == 'feature_ablation':
+                            attr_method = FeatureAblation(wrapper)
+                            # Each token is one feature group
+                            mask = torch.zeros_like(x_objs_features, dtype=torch.long)
+                            for i in range(x_objs_features.shape[0]):
+                                mask[i, :] = i
+                            attrs = attr_method.attribute(
+                                x_objs_features,
+                                additional_forward_args=(x_objs_types,),
+                                feature_mask=mask)
+
+                    # Compute per-token importance (sum over attributes, skip padding at idx 0)
+                    token_importance = attrs.abs().sum(dim=-1)[1:]  # skip padding token
+                    active_mask = (x_objs[1:].abs().sum(dim=-1) > 0)
+                    token_importance = token_importance * active_mask.float()
+
+                    # Normalize
+                    max_imp = token_importance.max()
+                    if max_imp > 0:
+                        token_importance_norm = token_importance / max_imp
+                    else:
+                        token_importance_norm = token_importance
+
+                    # Visualize
+                    sample_dir = output_dir / f'{step:04d}'
+                    sample_dir.mkdir(parents=True, exist_ok=True)
+
+                    visualizer.render_combined(
+                        bounding_boxes=x_objs[1:].detach(),
+                        token_importance=token_importance_norm.detach(),
+                        method_name=method,
+                        output_head=output_head,
+                        save_path=str(sample_dir),
+                        step=step,
+                    )
+
+                    # Aggregate
+                    imp_np = token_importance.detach().cpu().numpy()
+                    active_np = active_mask.cpu().numpy()
+                    aggregate_stats[method][output_head]['token_importance_mean'].append(
+                        float(imp_np[active_np].mean()) if active_np.any() else 0.0)
+                    aggregate_stats[method][output_head]['num_active_tokens'].append(int(active_np.sum()))
+
+                except Exception as e:
+                    print(f"\n  Warning: {method}/{output_head} failed for step {step}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+
+    # Summary
+    print('\n' + '=' * 60)
+    print('AGGREGATE RESULTS (PlanT2 Token-Level)')
+    print('=' * 60)
+
+    summary = {}
+    for method in plant2_methods:
+        summary[method] = {}
+        for head in plant2_heads:
+            stats = aggregate_stats[method][head]
+            if stats['token_importance_mean']:
+                imp_mean = np.mean(stats['token_importance_mean'])
+                imp_std = np.std(stats['token_importance_mean'])
+                tok_mean = np.mean(stats['num_active_tokens'])
+                summary[method][head] = {
+                    'token_importance_mean': float(imp_mean),
+                    'token_importance_std': float(imp_std),
+                    'avg_active_tokens': float(tok_mean),
+                    'num_samples': len(stats['token_importance_mean']),
+                }
+                print(f'  {method:25s} / {head:15s}: '
+                      f'Importance={imp_mean:.4f} (+/-{imp_std:.4f}), '
+                      f'Active tokens={tok_mean:.1f} '
+                      f'[n={len(stats["token_importance_mean"])}]')
+
+    summary_path = output_dir / 'summary.json'
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    print(f'\nSummary: {summary_path}')
+    print(f'Visualizations: {output_dir}/')
+
+
+def _print_and_save_summary(aggregate_stats, methods, output_heads, output_dir):
+    """Print and save aggregate summary for TF++ analysis."""
     print('\n' + '=' * 60)
     print('AGGREGATE RESULTS')
     print('=' * 60)
 
     summary = {}
-    for method in args.methods:
+    for method in methods:
         summary[method] = {}
-        for head in args.output_heads:
+        for head in output_heads:
             stats = aggregate_stats[method][head]
             if stats['rgb_importance']:
                 rgb_mean = np.mean(stats['rgb_importance'])

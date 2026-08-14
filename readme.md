@@ -159,7 +159,7 @@ self.xai_n_steps = 50             # Integrated Gradients Schritte
 self.xai_baseline = 'zeros'       # Baseline für IG (zeros = schwarzes Bild)
 self.xai_target_layer = '...'     # Ziel-Layer für GradCAM
 self.xai_skip_first_steps = 60    # Erste N Steps überspringen (Warmup)
-self.xai_event_driven = Trü      # Event-basiertes Speichern aktivieren
+self.xai_event_driven = True      # Event-basiertes Speichern aktivieren
 self.xai_event_object_distance = 15.0  # Speichern wenn Objekt näher als N Meter
 self.xai_event_brake_threshold = 1.0   # Speichern wenn pred. Speed < N m/s
 ```
@@ -175,7 +175,7 @@ gespeichert wenn relevante Events auftreten:
   `xai_event_brake_threshold` m/s vorher
 - **Warmup-Skip**: Die ersten `xai_skip_first_steps` Steps werden übersprungen
   (Initialisierungsphase wo das Fahrzeug steht)
-
+Wa
 Jeder gespeicherte Tensor enthält zusätzlich:
 - `save_reason`: Warum gespeichert wurde (`periodic`, `object_nearby_5.2m`, `braking_0.3ms`)
 - `pred_target_speed`: Vorhergesagte Zielgeschwindigkeit
@@ -199,14 +199,15 @@ print(sample['gt_speed'])       # z.B. 8.3  (fährt noch zu schnell)
 
 ```
 team_code/xai/
-  __init__.py         - Public API
-  wrapper.py          - Captum-kompatible Modell-Wrapper
-  attributions.py     - Attribution-Engine (XAIEngine Klasse)
-  visualization.py    - Heatmap-Rendering (XAIVisualizer Klasse)
-  analysis.py         - Standalone Offline-Analyse CLI
+  __init__.py            - Public API
+  wrapper.py             - Captum-kompatible Wrapper (TF++/LidarCenterNet)
+  attributions.py        - Attribution-Engine (XAIEngine Klasse)
+  visualization.py       - Heatmap-Rendering (XAIVisualizer Klasse)
+  plant_visualization.py - Token-Importance Visualisierung (PlanT2)
+  analysis.py            - Standalone Offline-Analyse CLI (TF++ und PlanT2)
 ```
 
-### Wie die Wrapper funktionieren
+### Wie die Wrapper funktionieren (TF++)
 
 Captum erwartet Modelle mit einem klaren `forward(input) -> scalar` Interface. Da `LidarCenterNet` 6 Inputs nimmt und 10 Outputs zurückgibt, werden leichtgewichtige Wrapper verwendet:
 
@@ -214,9 +215,9 @@ Captum erwartet Modelle mit einem klaren `forward(input) -> scalar` Interface. D
 - **WaypointWrapper** - Isoliert Waypoint- oder Checkpoint-Vorhersagen
 - **BBoxWrapper** - Isoliert die Bounding-Box Confidence
 - **SemanticWrapper** - Isoliert semantische Segmentierungs-Logits
-- **CaptumForwardAdapter** - übersetzt zwischen Captums `(inputs, additional_forward_args)` Konvention und dem Modell-Interface
+- **CaptumForwardAdapter** - Übersetzt zwischen Captums `(inputs, additional_forward_args)` Konvention und dem Modell-Interface
 
-### Multi-Modal Attribution
+### Multi-Modal Attribution (TF++)
 
 Bei der Attribution werden RGB und LiDAR als primäre Inputs behandelt. Target Point, Geschwindigkeit und Kommando werden als `additional_forward_args` durchgereicht und nicht attributiert:
 
@@ -225,9 +226,25 @@ inputs = (rgb, lidar_bev)              <- hierauf werden Gradienten berechnet
 additional_forward_args = (target_point, ego_vel, command)  <- konstant gehalten
 ```
 
+### Token-Level Attribution (PlanT2)
+
+PlanT2 arbeitet nicht mit rohen Sensor-Inputs, sondern mit vorverarbeiteten Objekt-Tokens. Die Attribution beantwortet eine andere Frage:
+
+- **TF++**: "Welche Pixel beeinflussen die Entscheidung?" → Spatial Heatmaps
+- **PlanT2**: "Welche erkannten Objekte beeinflussen die Entscheidung?" → Token-Importance-Ranking
+
+```
+inputs = (x_objs_features,)            <- Kontinuierliche Token-Features (x,y,yaw,speed,w,l)
+additional_forward_args = (x_objs_types,)  <- Typ-Spalte (diskret, konstant gehalten)
+```
+
+Die Typ-Spalte (Index 0) wird separat als `additional_forward_args` behandelt, da sie in einer Boolean-Maske (`x_objs[...,0] == i`) verwendet wird und keine sinnvollen Gradienten liefert.
+
 ### Attention-Extraktion
 
-Die GPT Fusion-Blöcke im TransfuserBackbone verwenden standardmässig Flash Attention (keine Weights gespeichert). Für XAI kann ein `store_attention`-Flag aktiviert werden, das auf eine explizite Attention-Berechnung umschaltet und die Weights speichert.
+**TF++**: Die GPT Fusion-Blöcke im TransfuserBackbone verwenden standardmässig Flash Attention (keine Weights gespeichert). Für XAI kann ein `store_attention`-Flag aktiviert werden, das auf eine explizite Attention-Berechnung umschaltet und die Weights speichert.
+
+**PlanT2**: Der HuggingFace-Transformer gibt Attention-Weights direkt via `output_attentions=True` zurück. Die Self-Attention-Matrizen zeigen, welche Tokens sich gegenseitig beeinflussen.
 
 ---
 
@@ -336,11 +353,130 @@ python -m xai.analysis \
 
 ---
 
+---
+
+## PlanT2-Unterstützung
+
+PlanT2 ist ein token-basiertes Modell aus dem [offiziellen Repository](https://github.com/autonomousvision/plant2). Es verwendet privilegierten Zugang zum Simulator (Bounding Boxes statt rohe Sensordaten) und einen HuggingFace-Transformer (BERT-Medium) als Backbone.
+
+### Evaluation starten
+
+```bash
+# Standard-Evaluation mit Live-Visualisierung + XAI-Tensor-Speicherung
+LIVE_VISU=1 XAI_ENABLED=1 SAVE_PATH=./eval_out \
+python leaderboard/leaderboard/leaderboard_evaluator_local.py \
+  --routes ./fail2drive_split/Base_PedestriansOnRoad_0085.xml \
+  --agent ./team_code/plant2_agent.py \
+  --agent-config ./checkpoints/plant2 \
+  --track MAP
+```
+
+Wichtig: PlanT2 braucht `--track MAP` (privilegierter Agent).
+
+### Live-Visualisierung
+
+Bei `LIVE_VISU=1` zeigt ein pygame-Fenster:
+- **Oben**: RGB-Kamerabild (Frontkamera)
+- **Unten**: Synthetisches BEV mit:
+  - Farbkodierte Objekt-Tokens (Orange=Auto, Gruen=Fussgaenger, Rot=Ampel, etc.)
+  - Geplante Route (blaue Linie)
+  - Predicted Path/Waypoints (Farbverlauf)
+  - Geschwindigkeitsanzeige (Soll/Ist)
+
+Die Bilder werden gleichzeitig als PNG im Output-Ordner gespeichert.
+
+### XAI-Analyse (Offline)
+
+```bash
+cd team_code
+python -m xai.analysis \
+    --checkpoint ../checkpoints/plant2 \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency integrated_gradients \
+    --output_heads target_speed checkpoint
+```
+
+Das Analyse-Skript erkennt automatisch den Modell-Typ (TF++ oder PlanT2) anhand des Checkpoint-Formats (.pth vs .ckpt).
+
+### PlanT2 Tensor-Format
+
+| Key | Shape | Beschreibung |
+|-----|-------|--------------|
+| `x_objs` | `(N, 7)` | Alle Objekt-Tokens [type, x, y, yaw_deg, speed_kmh, width, length] |
+| `idxs` | `(1, max_seq)` | Indices die x_objs den Batch-Samples zuordnen |
+| `route_original` | `(1, 20, 2)` | Geplante Route in Ego-Koordinaten |
+| `speed_limit` | `(1,)` | Geschwindigkeitslimit-Kategorie (0-3) |
+| `ego_speed` | `(1,)` | Eigengeschwindigkeit |
+| `model_type` | `'plant2'` | Identifikator |
+
+### PlanT2 vs. TF++ Vergleich
+
+| Aspekt | TF++ (LidarCenterNet) | PlanT2 (HFLM) |
+|--------|----------------------|----------------|
+| Input-Typ | Rohe Pixel (RGB + LiDAR BEV) | Objekt-Tokens (privilegiert vom Simulator) |
+| Attribution-Level | Pixel-weise Saliency | Token-weise Importance |
+| Kernfrage | "Welche Bildregion?" | "Welches Objekt?" |
+| Visualisierung | Heatmap auf RGB/BEV | Farbkodierte Objekte + Ranking |
+| Attention | Cross-Modal (Image<->LiDAR) | Self-Attention (Token<->Token) |
+| XAI-Methoden | Saliency, IG, GradCAM, Feature Ablation | Saliency, IG, Feature Ablation |
+| Controller | PID (alter Tuning) | PID (speed-dependent) + Linear Regression |
+| Track | `--track SENSORS` | `--track MAP` |
+
+### PlanT2 Dateien
+
+| Datei | Funktion |
+|-------|----------|
+| `team_code/plant2_agent.py` | Agent fuer CARLA-Evaluation |
+| `team_code/plant2_model.py` | HFLM-Netzwerk (Transformer + Waypoint-Decoder) |
+| `team_code/plant2_lit_module.py` | PyTorch Lightning Wrapper |
+| `team_code/plant2_variables.py` | Konstanten (Objekt-Typen, Speed-Bins) |
+| `checkpoints/hf_models/prajjwal1/bert-medium/` | Lokale BERT-Config (kein Internet noetig) |
+
+---
+
+## Evaluation-Toolkit
+
+Das `evaluation/`-Verzeichnis enthält Skripte zur quantitativen Beantwortung der Research Questions. Detaillierte Dokumentation: `evaluation/documentation.md`.
+
+### Schnellstart
+
+```bash
+# 1. Evaluationen laufen lassen (CARLA muss laufen)
+./evaluation/run_paired_evaluation.sh PedestriansOnRoad
+
+# 2. Quantitativer Vergleich Base vs. Generalization
+python evaluation/aggregate_category.py \
+    --checkpoint ./checkpoints/tfpp \
+    --base_category Base_PedestriansOnRoad \
+    --gen_category Generalization_Animals \
+    --output_dir ./evaluation/results/rq2
+
+# 3. Kausaler Occlusion-Test (RQ3, nur TF++)
+python evaluation/roi_occlusion.py \
+    --checkpoint ./checkpoints/tfpp \
+    --tensor_dir ./eval_out/Base_ConstructionPermutations_0015/xai_tensors \
+    --roi sign 0.35 0.15 0.55 0.45 \
+    --roi cones 0.20 0.50 0.80 0.90 \
+    --output_dir ./evaluation/results/rq3_occlusion
+```
+
+### Verfügbare Evaluations-Skripte
+
+| Skript | Zweck |
+|--------|-------|
+| `evaluation/paired_comparison.py` | Quantitativer Vergleich zweier Runs (Spatial-Metriken, Modality-Shift) |
+| `evaluation/aggregate_category.py` | Aggregiert alle Routen einer Kategorie fuer statistische Vergleiche |
+| `evaluation/roi_occlusion.py` | Kausaler Test durch gezieltes Verdecken von Bildregionen (nur TF++) |
+| `evaluation/run_paired_evaluation.sh` | Batch-Runner fuer alle Routen einer Szenario-Kategorie |
+
+---
+
 ## Modifizierte bestehende Dateien
 
-| Datei | änderung |
+| Datei | Aenderung |
 |-------|-----------|
-| `team_code/config.py` | XAI-Konfigurationsblock hinzugefügt |
-| `team_code/requirements.txt` | `captum>=0.7.0` hinzugefügt |
-| `team_code/sensor_agent.py` | Tensor-Speicherung + optionale Live-XAI |
-| `team_code/transfuser.py` | `store_attention`-Flag für Attention-Extraktion |
+| `team_code/config.py` | XAI-Konfigurationsblock hinzugefuegt |
+| `team_code/requirements.txt` | `captum>=0.7.0` hinzugefuegt |
+| `team_code/sensor_agent.py` | Tensor-Speicherung + optionale Live-XAI (TF++) |
+| `team_code/transfuser.py` | `store_attention`-Flag fuer Attention-Extraktion |
