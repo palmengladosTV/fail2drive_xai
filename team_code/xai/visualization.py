@@ -259,11 +259,16 @@ class XAIVisualizer:
         for i, attn in enumerate(attention_weights):
             if isinstance(attn, torch.Tensor):
                 attn = attn.cpu().numpy()
-            if attn.ndim > 2:
+            while attn.ndim > 2:
                 attn = attn.mean(axis=0)
 
-            attn_norm = (attn - attn.min()) / (attn.max() - attn.min() + 1e-8)
-            attn_resized = cv2.resize(attn_norm.astype(np.float32), (panel_size, panel_size),
+            attn = attn.astype(np.float32)
+            attn = np.log(attn + 1e-8)
+            vmin = np.percentile(attn, 2)
+            vmax = np.percentile(attn, 98)
+            attn_norm = np.clip((attn - vmin) / (vmax - vmin + 1e-8), 0, 1)
+
+            attn_resized = cv2.resize(attn_norm, (panel_size, panel_size),
                                        interpolation=cv2.INTER_LINEAR)
             colored = _apply_colormap(attn_resized)
             x_start = i * panel_size

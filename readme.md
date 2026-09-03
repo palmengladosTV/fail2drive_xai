@@ -79,7 +79,7 @@ python -m xai.analysis \
     --checkpoint ../checkpoints/tfpp \
     --tensor_dir ../eval_output/<route>/xai_tensors \
     --output_dir ../xai_results \
-    --methods saliency integrated_gradients grad_cam \
+    --methods saliency integrated_gradients grad_cam deeplift \
     --output_heads target_speed checkpoint waypoint \
     --attention
 
@@ -115,7 +115,7 @@ xai_results/
 |----------|-------|--------------|
 | `XAI_ENABLED` | `0` / `1` | Aktiviert Tensor-Speicherung bei Evaluation |
 | `XAI_LIVE` | `0` / `1` | Zusätzlich Live-XAI-Berechnung während Evaluation |
-| `XAI_METHOD` | siehe unten | Methode für Live-Modus |
+| `XAI_METHOD` | `saliency`, `integrated_gradients`, `grad_cam`, `feature_ablation`, `deeplift` | Methode für Live-Modus |
 | `XAI_OUTPUT_HEAD` | siehe unten | Output-Head für Live-Modus |
 | `SAVE_PATH` | Pfad | Speicherort für alle Outputs |
 | `DEBUG_CHALLENGE` | `0` / `1` | Aktiviert Debug-Visualisierungen |
@@ -130,6 +130,7 @@ xai_results/
 | Integrated Gradients | `integrated_gradients` | Akkumuliert Gradienten entlang eines Pfades von einem Baseline-Input zum tatsächlichen Input. Erfüllt Axiome der Attribution (Completeness, Sensitivity). | Langsam (n_steps=50) |
 | GradCAM | `grad_cam` | Gewichtete Aktivierungskarte der letzten Convolutional Layer. Zeigt welche räumlichen Regionen im Feature-Space relevant sind. | Schnell |
 | Feature Ablation | `feature_ablation` | Systematisches Entfernen von Input-Regionen und Messen des Output-Unterschieds. | Mittel |
+| DeepLift | `deeplift` | Vergleicht Neuronen-Aktivierungen mit einer Referenz-Aktivierung (Baseline). Verwendet modifizierte Backpropagation-Regeln statt Standard-Gradienten. | Schnell |
 | Attention | `--attention` Flag | Extrahiert Cross-Modal Attention-Weights aus den GPT Fusion-Blöcken (Image <-> LiDAR). | Schnell |
 
 ---
@@ -325,7 +326,7 @@ python -m xai.analysis \
     --checkpoint ../checkpoints/tfpp \
     --tensor_dir ../eval_out/<route>/xai_tensors \
     --output_dir ../xai_results_full \
-    --methods saliency integrated_gradients grad_cam feature_ablation \
+    --methods saliency integrated_gradients grad_cam deeplift feature_ablation \
     --output_heads target_speed checkpoint waypoint bbox semantic \
     --attention
 
@@ -419,7 +420,7 @@ Das Analyse-Skript erkennt automatisch den Modell-Typ (TF++ oder PlanT2) anhand 
 | Kernfrage | "Welche Bildregion?" | "Welches Objekt?" |
 | Visualisierung | Heatmap auf RGB/BEV | Farbkodierte Objekte + Ranking |
 | Attention | Cross-Modal (Image<->LiDAR) | Self-Attention (Token<->Token) |
-| XAI-Methoden | Saliency, IG, GradCAM, Feature Ablation | Saliency, IG, Feature Ablation |
+| XAI-Methoden | Saliency, IG, GradCAM, Feature Ablation, DeepLift | Saliency, IG, Feature Ablation, DeepLift |
 | Controller | PID (alter Tuning) | PID (speed-dependent) + Linear Regression |
 | Track | `--track SENSORS` | `--track MAP` |
 

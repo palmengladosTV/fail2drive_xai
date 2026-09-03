@@ -811,7 +811,7 @@ class GlobalConfig:
     # XAI / Explainability (Captum)
     # -----------------------------------------------------------------------------
     self.xai_enabled = False
-    self.xai_methods = ['saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation', 'attention']
+    self.xai_methods = ['saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation', 'deeplift', 'attention']
     self.xai_output_heads = ['target_speed', 'checkpoint', 'waypoint', 'bbox', 'semantic']
     self.xai_save_freq = 10
     self.xai_n_steps = 50

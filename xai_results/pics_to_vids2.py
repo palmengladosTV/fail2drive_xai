@@ -25,7 +25,7 @@ def put_text_with_shadow(img, text, position):
                 font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
-def create_combined_videos(master_folder, categories_root_folder, fps=10):
+def create_combined_videos(master_folder, categories_root_folder, fps=2):
     # 1. MASTER-Bilder einlesen und nach ihrer Nummer indexieren
     print("Scanne Master-Ordner...")
     master_images = [img for img in os.listdir(master_folder) if img.endswith(".png")]

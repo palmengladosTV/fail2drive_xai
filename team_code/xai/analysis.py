@@ -257,7 +257,7 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
 
 def _run_plant2_analysis(args, model, device, pt_files, output_dir):
     """Run XAI analysis for PlanT2 tensors (token-level attribution)."""
-    from captum.attr import Saliency, IntegratedGradients, FeatureAblation, NoiseTunnel
+    from captum.attr import Saliency, IntegratedGradients
     from xai.plant_visualization import PlanTXAIVisualizer
 
     raw_model = model.model if hasattr(model, 'model') else model
@@ -276,10 +276,15 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
         plant2_heads = ['waypoint']
         print(f'  Note: Defaulting to output_heads={plant2_heads} for PlanT2')
 
-    plant2_methods = [m for m in args.methods if m in ('saliency', 'integrated_gradients', 'feature_ablation')]
+    unsupported = [m for m in args.methods if m in ('deeplift', 'feature_ablation', 'grad_cam')]
+    if unsupported:
+        print(f'  Note: Skipping {unsupported} for PlanT2 — these methods manipulate the '
+              f'input batch dimension, which is incompatible with the token-to-batch '
+              f'remapping via batch_idxs in PlanT2.')
+    plant2_methods = [m for m in args.methods if m in ('saliency', 'integrated_gradients')]
     if not plant2_methods:
         plant2_methods = ['saliency']
-        print(f'  Note: Defaulting to methods={plant2_methods} for PlanT2 (grad_cam not supported)')
+        print(f'  Note: Defaulting to methods={plant2_methods} for PlanT2')
 
     aggregate_stats = {method: {head: {'token_importance_mean': [], 'num_active_tokens': []}
                                  for head in plant2_heads}
@@ -300,6 +305,10 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
 
         Solution: attribute only to continuous features (columns 1-6),
         keeping the type column fixed via additional_forward_args.
+
+        Note: DeepLift and FeatureAblation are not supported because they
+        manipulate the input batch dimension, which breaks the token-to-batch
+        remapping via batch_idxs inside the PlanT2 model.
         """
         def __init__(self, hflm_model, output_head):
             super().__init__()
@@ -308,7 +317,6 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
             self.batch_template = None
 
         def forward(self, x_objs_features, x_objs_types):
-            # Reconstruct full x_objs: [types | features]
             x_objs = torch.cat([x_objs_types, x_objs_features], dim=-1)
 
             batch = dict(self.batch_template)
@@ -367,7 +375,7 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
                     wrapper.batch_template = batch
 
                     # Split x_objs into types (col 0, constant) and features (cols 1-6, attributed)
-                    x_objs_types = x_objs[:, 0:1].detach()  # NOT attributed
+                    x_objs_types = x_objs[:, 0:1].detach()
                     x_objs_features = x_objs[:, 1:].detach().requires_grad_(True)
 
                     with torch.enable_grad():
@@ -383,16 +391,6 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
                                 x_objs_features, baselines=baseline,
                                 additional_forward_args=(x_objs_types,),
                                 n_steps=50)
-                        elif method == 'feature_ablation':
-                            attr_method = FeatureAblation(wrapper)
-                            # Each token is one feature group
-                            mask = torch.zeros_like(x_objs_features, dtype=torch.long)
-                            for i in range(x_objs_features.shape[0]):
-                                mask[i, :] = i
-                            attrs = attr_method.attribute(
-                                x_objs_features,
-                                additional_forward_args=(x_objs_types,),
-                                feature_mask=mask)
 
                     # Compute per-token importance (sum over attributes, skip padding at idx 0)
                     token_importance = attrs.abs().sum(dim=-1)[1:]  # skip padding token
@@ -520,7 +518,7 @@ Examples:
       --checkpoint ./checkpoints/tfpp \\
       --tensor_dir ./eval_output/route_0/xai_tensors \\
       --output_dir ./xai_results \\
-      --methods saliency integrated_gradients grad_cam \\
+      --methods saliency integrated_gradients grad_cam deeplift \\
       --output_heads target_speed checkpoint waypoint \\
       --attention
         """)
@@ -534,7 +532,7 @@ Examples:
                         help='Output directory for XAI visualizations and statistics')
     parser.add_argument('--methods', type=str, nargs='+',
                         default=['saliency', 'integrated_gradients'],
-                        choices=['saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation'],
+                        choices=['saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation', 'deeplift'],
                         help='XAI methods to compute')
     parser.add_argument('--output_heads', type=str, nargs='+',
                         default=['target_speed', 'checkpoint'],

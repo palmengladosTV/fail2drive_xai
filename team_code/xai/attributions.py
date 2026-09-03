@@ -13,6 +13,7 @@ from captum.attr import (
     LayerGradCam,
     FeatureAblation,
     NoiseTunnel,
+    DeepLift,
 )
 
 from xai.wrapper import (
@@ -95,7 +96,7 @@ class XAIEngine:
         """Compute attribution for a given method and output head.
 
         Args:
-            method: One of 'saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation'
+            method: One of 'saliency', 'integrated_gradients', 'grad_cam', 'feature_ablation', 'deeplift'
             output_head: One of 'target_speed', 'checkpoint', 'waypoint', 'bbox', 'semantic'
             rgb: Input RGB tensor (B, 3, H, W)
             lidar_bev: Input LiDAR BEV tensor (B, C, H, W)
@@ -191,9 +192,21 @@ class XAIEngine:
                 attrs = attr_method.attribute(inputs,
                                               additional_forward_args=additional_forward_args,
                                               feature_mask=feature_mask)
+
+            elif method == 'deeplift':
+                attr_method = DeepLift(adapter)
+                if smooth:
+                    attr_method = NoiseTunnel(attr_method)
+                    attrs = attr_method.attribute(inputs, baselines=baselines,
+                                                  additional_forward_args=additional_forward_args,
+                                                  nt_samples=smooth_samples,
+                                                  nt_type='smoothgrad')
+                else:
+                    attrs = attr_method.attribute(inputs, baselines=baselines,
+                                                  additional_forward_args=additional_forward_args)
             else:
                 raise ValueError(f"Unknown method: {method}. "
-                                 "Options: saliency, integrated_gradients, grad_cam, feature_ablation")
+                                 "Options: saliency, integrated_gradients, grad_cam, feature_ablation, deeplift")
 
         if not isinstance(attrs, tuple):
             attrs = (attrs,)
