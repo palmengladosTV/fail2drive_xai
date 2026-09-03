@@ -156,6 +156,8 @@ def run_analysis(args):
 
     if getattr(args, 'degrade', None):
         output_dir = base_dir / f'degrade_{args.degrade}_{args.degrade_method}_{args.degrade_strength}'
+    elif getattr(args, 'ablate', None):
+        output_dir = base_dir / f'ablate_{args.ablate}_{args.ablate_target}'
     elif run_name:
         output_dir = base_dir / 'reference'
     else:
@@ -401,6 +403,57 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
                             degradation=degradation_meta)
 
 
+PLANT2_TYPE_NAMES = {
+    'car': 1, 'walker': 2, 'static': 3,
+    'stop_sign': 4, 'traffic_light': 5, 'emergency': 6,
+}
+PLANT2_TYPE_LABELS = {v: k for k, v in PLANT2_TYPE_NAMES.items()}
+PLANT2_TYPE_LABELS[0] = 'padding'
+
+
+def _apply_token_ablation(x_objs, idxs, mode, target):
+    """Remove tokens from PlanT2 input and remap batch indices.
+
+    Args:
+        x_objs: Token tensor (N, 7) where col 0 is type index
+        idxs: Batch index tensor (B, max_seq) indexing into x_objs
+        mode: 'type' or 'distance'
+        target: Type name string (for mode='type') or distance float (for mode='distance')
+
+    Returns:
+        (ablated_x_objs, ablated_idxs, num_removed, removed_info)
+    """
+    n_original = len(x_objs)
+    keep_mask = torch.ones(n_original, dtype=torch.bool, device=x_objs.device)
+
+    if mode == 'type':
+        type_idx = PLANT2_TYPE_NAMES[target]
+        remove_mask = x_objs[:, 0] == type_idx
+        keep_mask = ~remove_mask
+    elif mode == 'distance':
+        dist_threshold = float(target)
+        distances = torch.sqrt(x_objs[:, 1] ** 2 + x_objs[:, 2] ** 2)
+        keep_mask = distances <= dist_threshold
+
+    keep_mask[0] = True
+
+    num_removed = int((~keep_mask).sum().item())
+    removed_tokens = x_objs[~keep_mask]
+    removed_info = []
+    for tok in removed_tokens:
+        type_id = int(tok[0].item())
+        dist = float(torch.sqrt(tok[1] ** 2 + tok[2] ** 2).item())
+        removed_info.append(f'{PLANT2_TYPE_LABELS.get(type_id, "?")} dist={dist:.1f}m')
+
+    old_to_new = torch.zeros(n_original, dtype=torch.long, device=x_objs.device)
+    old_to_new[keep_mask] = torch.arange(keep_mask.sum(), device=x_objs.device)
+
+    ablated_x_objs = x_objs[keep_mask]
+    ablated_idxs = old_to_new[idxs]
+
+    return ablated_x_objs, ablated_idxs, num_removed, removed_info
+
+
 def _run_plant2_analysis(args, model, device, pt_files, output_dir):
     """Run XAI analysis for PlanT2 tensors (token-level attribution)."""
     from captum.attr import Saliency, IntegratedGradients
@@ -436,10 +489,17 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
                                  for head in plant2_heads}
                        for method in plant2_methods}
 
+    ablate_info = None
+    total_tokens_removed = 0
+    if getattr(args, 'ablate', None):
+        ablate_info = f'{args.ablate}={args.ablate_target}'
+
     print(f'\nRunning PlanT2 XAI analysis (token-level):')
     print(f'  Methods: {plant2_methods}')
     print(f'  Output heads: {plant2_heads}')
     print(f'  Samples: {len(pt_files)}')
+    if ablate_info:
+        print(f'  Ablation: {ablate_info}')
     print(f'  Output: {output_dir}\n')
 
     class PlanT2ForwardWrapper(torch.nn.Module):
@@ -514,6 +574,21 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
                 es = es.unsqueeze(0)
             batch['ego_speed'] = es
 
+        if ablate_info:
+            x_objs, idxs, num_removed, removed_info = _apply_token_ablation(
+                x_objs, idxs, args.ablate, args.ablate_target)
+            batch['x_objs'] = x_objs
+            batch['idxs'] = idxs
+            total_tokens_removed += num_removed
+            if removed_info:
+                sample_dir = output_dir / f'{step:04d}'
+                sample_dir.mkdir(parents=True, exist_ok=True)
+                with open(sample_dir / f'ablation_info_{step:04d}.txt', 'w') as f:
+                    f.write(f'Ablation: {ablate_info}\n')
+                    f.write(f'Tokens removed: {num_removed}\n')
+                    for info in removed_info:
+                        f.write(f'  - {info}\n')
+
         for method in plant2_methods:
             for output_head in plant2_heads:
                 try:
@@ -579,9 +654,18 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
     # Summary
     print('\n' + '=' * 60)
     print('AGGREGATE RESULTS (PlanT2 Token-Level)')
+    if ablate_info:
+        print(f'  Ablation: {ablate_info} (total removed: {total_tokens_removed})')
     print('=' * 60)
 
     summary = {}
+    if ablate_info:
+        summary['ablation'] = {
+            'mode': args.ablate,
+            'target': args.ablate_target,
+            'tokens_removed_total': total_tokens_removed,
+            'tokens_removed_mean': total_tokens_removed / max(len(pt_files), 1),
+        }
     for method in plant2_methods:
         summary[method] = {}
         for head in plant2_heads:
@@ -711,6 +795,13 @@ Examples:
     parser.add_argument('--degrade_strength', type=float, default=0.5,
                         help='Degradation strength 0.0-1.0 (default: 0.5)')
 
+    parser.add_argument('--ablate', type=str, default=None,
+                        choices=['type', 'distance'],
+                        help='Token ablation mode for PlanT2: remove by object type or distance')
+    parser.add_argument('--ablate_target', type=str, default=None,
+                        help='Ablation target: type name (car/walker/static/stop_sign/'
+                             'traffic_light/emergency) or distance threshold in meters')
+
     args = parser.parse_args()
 
     if args.degrade:
@@ -720,6 +811,18 @@ Examples:
             parser.error('--degrade_method dropout is only valid with --degrade lidar')
         if not 0.0 <= args.degrade_strength <= 1.0:
             parser.error('--degrade_strength must be between 0.0 and 1.0')
+
+    if args.ablate:
+        if not args.ablate_target:
+            parser.error('--ablate_target is required when using --ablate')
+        if args.ablate == 'type' and args.ablate_target not in PLANT2_TYPE_NAMES:
+            parser.error(f'--ablate_target must be one of: {", ".join(PLANT2_TYPE_NAMES.keys())}')
+        if args.ablate == 'distance':
+            try:
+                float(args.ablate_target)
+            except ValueError:
+                parser.error('--ablate_target must be a number (distance in meters) '
+                             'when using --ablate distance')
 
     run_analysis(args)
 

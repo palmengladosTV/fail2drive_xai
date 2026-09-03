@@ -404,6 +404,75 @@ Die Ergebnisse werden in einem Ordner mit Degradierungs-Info im Namen gespeicher
 
 ---
 
+## Token Ablation (PlanT2)
+
+Token Ablation ist das PlanT2-Äquivalent zur Modality Degradation bei TF++. Statt Sensordaten zu verschlechtern, werden gezielt Objekte aus der Token-Liste entfernt, um kausal zu testen, welche Objekte die Fahrentscheidung des Modells beeinflussen.
+
+### Beispiele
+
+```bash
+cd team_code
+
+# Alle Fussgänger entfernen:
+python -m xai.analysis \
+    --checkpoint ../checkpoints/plant2 \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency integrated_gradients \
+    --output_heads target_speed \
+    --ablate type --ablate_target walker
+
+# Alle Fahrzeuge entfernen:
+python -m xai.analysis \
+    --checkpoint ../checkpoints/plant2 \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency \
+    --output_heads target_speed \
+    --ablate type --ablate_target car
+
+# Alle Ampeln entfernen:
+python -m xai.analysis \
+    --checkpoint ../checkpoints/plant2 \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency \
+    --output_heads target_speed \
+    --ablate type --ablate_target traffic_light
+
+# Nur Objekte innerhalb von 10 Metern behalten:
+python -m xai.analysis \
+    --checkpoint ../checkpoints/plant2 \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency \
+    --output_heads target_speed \
+    --ablate distance --ablate_target 10.0
+```
+
+### Parameter
+
+| Flag | Werte | Beschreibung |
+|------|-------|--------------|
+| `--ablate` | `type`, `distance` | Ablationsmodus (nur PlanT2) |
+| `--ablate_target` | Typname oder Distanz | Ziel: Objekttyp-Name oder Entfernung in Metern |
+
+**Verfügbare Typnamen:** `car`, `walker`, `static`, `stop_sign`, `traffic_light`, `emergency`
+
+### Output
+
+Pro Step wird eine Datei `ablation_info_XXXX.txt` erzeugt, die alle entfernten Tokens auflistet (Typ, Position, Distanz). Die `summary.json` enthält ein `"ablation"` Feld mit Modus, Ziel und Anzahl entfernter Tokens.
+
+### Demo-Skript
+
+```bash
+python evaluation/run_plant2_ablation_demo.py
+```
+
+Führt automatisch drei Analysen durch (Referenz, ohne Fussgänger, ohne Fahrzeuge) und gibt einen tabellarischen Vergleich aus.
+
+---
+
 ## Troubleshooting
 
 | Problem | Lösung |
@@ -495,43 +564,6 @@ Das Analyse-Skript erkennt automatisch den Modell-Typ (TF++ oder PlanT2) anhand 
 | `team_code/plant2_lit_module.py` | PyTorch Lightning Wrapper |
 | `team_code/plant2_variables.py` | Konstanten (Objekt-Typen, Speed-Bins) |
 | `checkpoints/hf_models/prajjwal1/bert-medium/` | Lokale BERT-Config (kein Internet noetig) |
-
----
-
-## Evaluation-Toolkit
-
-Das `evaluation/`-Verzeichnis enthält Skripte zur quantitativen Beantwortung der Research Questions. Detaillierte Dokumentation: `evaluation/documentation.md`.
-
-### Schnellstart
-
-```bash
-# 1. Evaluationen laufen lassen (CARLA muss laufen)
-./evaluation/run_paired_evaluation.sh PedestriansOnRoad
-
-# 2. Quantitativer Vergleich Base vs. Generalization
-python evaluation/aggregate_category.py \
-    --checkpoint ./checkpoints/tfpp \
-    --base_category Base_PedestriansOnRoad \
-    --gen_category Generalization_Animals \
-    --output_dir ./evaluation/results/rq2
-
-# 3. Kausaler Occlusion-Test (RQ3, nur TF++)
-python evaluation/roi_occlusion.py \
-    --checkpoint ./checkpoints/tfpp \
-    --tensor_dir ./eval_out/Base_ConstructionPermutations_0015/xai_tensors \
-    --roi sign 0.35 0.15 0.55 0.45 \
-    --roi cones 0.20 0.50 0.80 0.90 \
-    --output_dir ./evaluation/results/rq3_occlusion
-```
-
-### Verfügbare Evaluations-Skripte
-
-| Skript | Zweck |
-|--------|-------|
-| `evaluation/paired_comparison.py` | Quantitativer Vergleich zweier Runs (Spatial-Metriken, Modality-Shift) |
-| `evaluation/aggregate_category.py` | Aggregiert alle Routen einer Kategorie fuer statistische Vergleiche |
-| `evaluation/roi_occlusion.py` | Kausaler Test durch gezieltes Verdecken von Bildregionen (nur TF++) |
-| `evaluation/run_paired_evaluation.sh` | Batch-Runner fuer alle Routen einer Szenario-Kategorie |
 
 ---
 
