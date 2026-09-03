@@ -28,6 +28,7 @@ import os
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -147,8 +148,18 @@ def run_analysis(args):
     model, config = load_model(args.checkpoint, device)
 
     from datetime import datetime
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(args.output_dir) / timestamp
+    run_name = getattr(args, 'run_name', None)
+    if run_name:
+        base_dir = Path(args.output_dir) / run_name
+    else:
+        base_dir = Path(args.output_dir) / datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    if getattr(args, 'degrade', None):
+        output_dir = base_dir / f'degrade_{args.degrade}_{args.degrade_method}_{args.degrade_strength}'
+    elif run_name:
+        output_dir = base_dir / 'reference'
+    else:
+        output_dir = base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pt_files = load_tensor_samples(args.tensor_dir, args.num_samples)
@@ -166,6 +177,110 @@ def run_analysis(args):
         raise ValueError(f"Unsupported model/tensor combination: model={model_type}, tensors={tensor_type}")
 
 
+def _apply_degradation(tensor, modality, method, strength, device):
+    """Apply degradation to a sensor modality tensor.
+
+    Args:
+        tensor: Input tensor (B, C, H, W) on device
+        modality: 'rgb' or 'lidar'
+        method: 'blur', 'noise', 'dropout', or 'zero'
+        strength: Float 0.0-1.0 controlling degradation intensity
+        device: torch device
+
+    Returns:
+        Degraded tensor (same shape, same device)
+    """
+    if method == 'zero':
+        return torch.zeros_like(tensor)
+
+    if method == 'blur' and modality == 'rgb':
+        img = tensor[0].cpu().numpy().transpose(1, 2, 0)
+        img = np.clip(img, 0, 255).astype(np.float32)
+        ksize = int(3 + strength * 48) | 1
+        img = cv2.GaussianBlur(img, (ksize, ksize), 0)
+        result = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0)
+        return result.to(device)
+
+    if method == 'noise':
+        noise_std = strength * tensor.abs().max().item() * 0.5
+        noise = torch.randn_like(tensor) * noise_std
+        return tensor + noise
+
+    if method == 'dropout' and modality == 'lidar':
+        mask = torch.rand_like(tensor) > strength
+        return tensor * mask.float()
+
+    raise ValueError(f"Invalid degradation: method={method} for modality={modality}")
+
+
+def _rgb_to_bgr(rgb_tensor):
+    """Convert RGB tensor [0, 255] (C, H, W) to BGR uint8 (H, W, 3)."""
+    img = rgb_tensor.cpu().numpy().transpose(1, 2, 0)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+
+def _lidar_to_bgr(lidar_tensor, width):
+    """Convert LiDAR BEV tensor (C, H, W) to BGR uint8 (width, width, 3)."""
+    lidar_np = lidar_tensor.cpu().numpy()[0]
+    gray = (255 - (np.clip(lidar_np, 0, 1) * 255)).astype(np.uint8)
+    bgr = np.stack([gray, gray, gray], axis=-1)
+    return cv2.resize(bgr, (width, width), interpolation=cv2.INTER_NEAREST)
+
+
+def _save_input_image(rgb_tensor, lidar_bev_tensor, save_path, step):
+    """Save the model input (RGB + LiDAR BEV) as a single image."""
+    rgb_bgr = _rgb_to_bgr(rgb_tensor)
+    h, w = rgb_bgr.shape[:2]
+    lidar_bgr = _lidar_to_bgr(lidar_bev_tensor, w)
+
+    combined = np.concatenate([rgb_bgr, lidar_bgr], axis=0)
+    cv2.putText(combined, 'Input RGB', (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combined, 'Input RGB', (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(combined, 'Input LiDAR BEV', (10, h + 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combined, 'Input LiDAR BEV', (10, h + 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, cv2.LINE_AA)
+
+    save_dir = Path(save_path)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(save_dir / f'input_{step:04d}.png'), combined)
+
+
+def _render_comparison(rgb_original, rgb_degraded, lidar_original, lidar_degraded,
+                       degrade_modality, degrade_info, save_path, step):
+    """Render side-by-side comparison of original vs degraded inputs."""
+    rgb_orig_bgr = _rgb_to_bgr(rgb_original)
+    rgb_deg_bgr = _rgb_to_bgr(rgb_degraded)
+    h, w = rgb_orig_bgr.shape[:2]
+
+    lidar_orig_bgr = _lidar_to_bgr(lidar_original, w)
+    lidar_deg_bgr = _lidar_to_bgr(lidar_degraded, w)
+
+    left = np.concatenate([rgb_orig_bgr, lidar_orig_bgr], axis=0)
+    right = np.concatenate([rgb_deg_bgr, lidar_deg_bgr], axis=0)
+
+    sep = np.ones((left.shape[0], 4, 3), dtype=np.uint8) * 128
+    combined = np.concatenate([left, sep, right], axis=1)
+
+    cv2.putText(combined, 'Original', (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combined, 'Original', (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, cv2.LINE_AA)
+    x_right = w + 4 + 10
+    cv2.putText(combined, f'Degraded: {degrade_info}', (x_right, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combined, f'Degraded: {degrade_info}', (x_right, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 1, cv2.LINE_AA)
+
+    save_dir = Path(save_path)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    filename = f'comparison_{step:04d}.png'
+    cv2.imwrite(str(save_dir / filename), combined)
+
+
 def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
     """Run XAI analysis for TF++ (LidarCenterNet) tensors."""
     engine = XAIEngine(model, config, device=device)
@@ -175,10 +290,16 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
                                  for head in args.output_heads}
                        for method in args.methods}
 
+    degrade_info = None
+    if getattr(args, 'degrade', None):
+        degrade_info = f'{args.degrade} {args.degrade_method} {args.degrade_strength}'
+
     print(f'\nRunning TF++ XAI analysis:')
     print(f'  Methods: {args.methods}')
     print(f'  Output heads: {args.output_heads}')
     print(f'  Samples: {len(pt_files)}')
+    if degrade_info:
+        print(f'  Degradation: {degrade_info}')
     print(f'  Output: {output_dir}\n')
 
     for pt_file in tqdm(pt_files, desc='XAI Analysis (TF++)'):
@@ -201,6 +322,22 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
             ego_vel = ego_vel.unsqueeze(0)
         if command.dim() == 1:
             command = command.unsqueeze(0)
+
+        if degrade_info:
+            rgb_original = rgb.clone()
+            lidar_original = lidar_bev.clone()
+            if args.degrade == 'rgb':
+                rgb = _apply_degradation(rgb, 'rgb', args.degrade_method, args.degrade_strength, device)
+            elif args.degrade == 'lidar':
+                lidar_bev = _apply_degradation(lidar_bev, 'lidar', args.degrade_method, args.degrade_strength, device)
+
+            sample_dir = output_dir / f'{step:04d}'
+            _render_comparison(
+                rgb_original[0], rgb[0], lidar_original[0], lidar_bev[0],
+                args.degrade, degrade_info, str(sample_dir), step)
+
+        sample_dir = output_dir / f'{step:04d}'
+        _save_input_image(rgb[0], lidar_bev[0], str(sample_dir), step)
 
         for method in args.methods:
             for output_head in args.output_heads:
@@ -225,6 +362,7 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
                         output_head=output_head,
                         save_path=str(sample_dir),
                         step=step,
+                        degrade_info=degrade_info,
                     )
 
                     rgb_imp = attributions['rgb'].abs().sum().item()
@@ -252,7 +390,15 @@ def _run_tfpp_analysis(args, model, config, device, pt_files, output_dir):
             except Exception as e:
                 print(f"\n  Warning: attention extraction failed for step {step}: {e}")
 
-    _print_and_save_summary(aggregate_stats, args.methods, args.output_heads, output_dir)
+    degradation_meta = None
+    if degrade_info:
+        degradation_meta = {
+            'modality': args.degrade,
+            'method': args.degrade_method,
+            'strength': args.degrade_strength,
+        }
+    _print_and_save_summary(aggregate_stats, args.methods, args.output_heads, output_dir,
+                            degradation=degradation_meta)
 
 
 def _run_plant2_analysis(args, model, device, pt_files, output_dir):
@@ -463,13 +609,19 @@ def _run_plant2_analysis(args, model, device, pt_files, output_dir):
     print(f'Visualizations: {output_dir}/')
 
 
-def _print_and_save_summary(aggregate_stats, methods, output_heads, output_dir):
+def _print_and_save_summary(aggregate_stats, methods, output_heads, output_dir,
+                            degradation=None):
     """Print and save aggregate summary for TF++ analysis."""
     print('\n' + '=' * 60)
     print('AGGREGATE RESULTS')
+    if degradation:
+        print(f'  Degradation: {degradation["modality"]} {degradation["method"]} '
+              f'strength={degradation["strength"]}')
     print('=' * 60)
 
     summary = {}
+    if degradation:
+        summary['degradation'] = degradation
     for method in methods:
         summary[method] = {}
         for head in output_heads:
@@ -545,7 +697,30 @@ Examples:
     parser.add_argument('--device', type=str, default=None,
                         help='Device (default: cuda if available, else cpu)')
 
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Custom run name for output directory (useful for grouping '
+                             'degradation variants in the same folder)')
+
+    parser.add_argument('--degrade', type=str, default=None,
+                        choices=['rgb', 'lidar'],
+                        help='Degrade a sensor modality to test model dependence (TF++ only)')
+    parser.add_argument('--degrade_method', type=str, default='blur',
+                        choices=['blur', 'noise', 'dropout', 'zero'],
+                        help='Degradation method (blur: RGB only, dropout: LiDAR only, '
+                             'noise/zero: both)')
+    parser.add_argument('--degrade_strength', type=float, default=0.5,
+                        help='Degradation strength 0.0-1.0 (default: 0.5)')
+
     args = parser.parse_args()
+
+    if args.degrade:
+        if args.degrade_method == 'blur' and args.degrade != 'rgb':
+            parser.error('--degrade_method blur is only valid with --degrade rgb')
+        if args.degrade_method == 'dropout' and args.degrade != 'lidar':
+            parser.error('--degrade_method dropout is only valid with --degrade lidar')
+        if not 0.0 <= args.degrade_strength <= 1.0:
+            parser.error('--degrade_strength must be between 0.0 and 1.0')
+
     run_analysis(args)
 
 

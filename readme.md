@@ -342,6 +342,68 @@ python -m xai.analysis \
 
 ---
 
+## Modality Degradation (A/B Testing)
+
+Mit Modality Degradation kann gezielt eine Sensormodalität (Kamera oder LiDAR) verschlechtert werden, um kausal zu testen, wie abhängig das Modell von jeder Eingabe ist. Die XAI-Analyse läuft anschließend auf den degradierten Daten — so lässt sich beobachten, ob sich die Modality-Importance verschiebt und ob das Modell auf die verbleibende Modalität ausweicht.
+
+### Beispiele
+
+```bash
+cd team_code
+
+# Kamerabild unscharf machen (Gaussian Blur):
+python -m xai.analysis \
+    --checkpoint ../checkpoints/tfpp \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency integrated_gradients \
+    --output_heads target_speed \
+    --degrade rgb --degrade_method blur --degrade_strength 0.5
+
+# LiDAR-Punkte zufällig entfernen (50% Dropout):
+python -m xai.analysis \
+    --checkpoint ../checkpoints/tfpp \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency integrated_gradients \
+    --output_heads target_speed \
+    --degrade lidar --degrade_method dropout --degrade_strength 0.8
+
+# Kompletter RGB-Ausfall (schwarzes Bild):
+python -m xai.analysis \
+    --checkpoint ../checkpoints/tfpp \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency \
+    --output_heads target_speed \
+    --degrade rgb --degrade_method zero
+
+# Rauschen auf LiDAR:
+python -m xai.analysis \
+    --checkpoint ../checkpoints/tfpp \
+    --tensor_dir ../eval_out/<route>/xai_tensors \
+    --output_dir ../xai_results \
+    --methods saliency \
+    --output_heads target_speed \
+    --degrade lidar --degrade_method noise --degrade_strength 0.3
+```
+
+### Parameter
+
+| Flag | Werte | Standard | Beschreibung |
+|------|-------|----------|--------------|
+| `--degrade` | `rgb`, `lidar` | — | Welche Modalität degradiert wird (nur TF++) |
+| `--degrade_method` | `blur`, `noise`, `dropout`, `zero` | `blur` | Art der Degradierung |
+| `--degrade_strength` | Float `0.0`–`1.0` | `0.5` | Stärke der Degradierung |
+
+**Methodenkompatibilität:** `blur` ist nur mit `--degrade rgb` verwendbar, `dropout` nur mit `--degrade lidar`. `noise` und `zero` funktionieren mit beiden Modalitäten.
+
+### Output
+
+Die Ergebnisse werden in einem Ordner mit Degradierungs-Info im Namen gespeichert, z.B. `xai_results/20260903_170000_degrade_rgb_blur_0.5/`. Pro Sample wird ein Vergleichsbild `comparison_XXXX.png` erzeugt, das Original und degradierte Eingabe nebeneinander zeigt. Die `summary.json` enthält ein zusätzliches `"degradation"` Feld mit Modalität, Methode und Stärke.
+
+---
+
 ## Troubleshooting
 
 | Problem | Lösung |

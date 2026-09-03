@@ -86,10 +86,7 @@ class XAIVisualizer:
         Returns:
             BGR image (H, W, 3) uint8
         """
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
         rgb_np = rgb_tensor.cpu().numpy().transpose(1, 2, 0)
-        rgb_np = (rgb_np * std + mean) * 255
         rgb_np = np.clip(rgb_np, 0, 255).astype(np.uint8)
         rgb_bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
 
@@ -172,7 +169,7 @@ class XAIVisualizer:
     def render_combined(self, rgb_tensor, lidar_bev_tensor, attributions,
                          method_name='', output_head='',
                          pred_target_speed=None, target_speeds=None,
-                         save_path=None, step=None):
+                         save_path=None, step=None, degrade_info=None):
         """Generate a full XAI panel with attribution overlays.
 
         Args:
@@ -195,10 +192,7 @@ class XAIVisualizer:
             rgb_panel = self.render_rgb_attribution(rgb_tensor, attributions['rgb'])
             panels.append(rgb_panel)
         else:
-            mean = np.array([0.485, 0.456, 0.406])
-            std = np.array([0.229, 0.224, 0.225])
             rgb_np = rgb_tensor.cpu().numpy().transpose(1, 2, 0)
-            rgb_np = (rgb_np * std + mean) * 255
             rgb_np = np.clip(rgb_np, 0, 255).astype(np.uint8)
             panels.append(cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR))
 
@@ -215,6 +209,8 @@ class XAIVisualizer:
         combined = np.concatenate(panels, axis=0)
 
         title = f'XAI: {method_name} -> {output_head}'
+        if degrade_info:
+            title += f'  [degraded: {degrade_info}]'
         cv2.putText(combined, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(combined, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, cv2.LINE_AA)
 

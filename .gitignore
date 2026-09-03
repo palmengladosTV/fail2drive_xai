@@ -216,3 +216,6 @@ cython_debug/
 *.json
 *.xml
 *.zip
+
+xai_results
+eval_out
